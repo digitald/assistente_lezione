@@ -10,22 +10,18 @@ class AIClient:
 
     def transcribe(self, file_object) -> str:
         """
-        Trascrive un file audio in testo italiano.
+        Trascrive un file audio, specificando che è in italiano.
         """
         try:
             prompt_migliorato = (
-                "Sei un sistema di trascrizione per una lezione universitaria in italiano. Il tuo obiettivo è produrre un testo pulito, accurato e ben formattato. Segui queste regole in modo tassativo:\n"
-                "1. Trascrivi solo le parole. Ignora completamente pause, silenzi, esitazioni (come 'uhm', 'ehm'), ripetizioni, parole smozzicate, rumori di fondo, colpi di tosse e qualsiasi altro suono non verbale.\n"
-                "2. Applica la punteggiatura corretta. Usa virgole, punti, maiuscole e punti interrogativi in modo appropriato per rendere il testo fluente e grammaticalmente corretto.\n"
-                "3. Crea paragrafi. Suddividi il testo in paragrafi distinti quando percepisci un cambio di argomento o una pausa significativa nel discorso del relatore.\n"
-                "4. Non descrivere i suoni. L'output non deve mai contenere etichette tra parentesi come [risata], [rumore] o [silenzio].\n"
-                "Il risultato finale deve essere esclusivamente il testo della lezione, pulito e pronto per la lettura."
+                "Stai trascrivendo una lezione universitaria in italiano, restitusci una stringa vuota in caso di volume troppo basso o di contenuto inintellegibile"
             )
 
             transcript = self.client.audio.transcriptions.create(
                 model="whisper-1",
                 file=file_object,
-                prompt=prompt_migliorato
+                prompt=prompt_migliorato,
+                language="it" # <-- AGGIUNGI QUESTA RIGA
             )
             return transcript.text.strip()
         except Exception as e:
