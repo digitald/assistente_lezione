@@ -1,0 +1,11 @@
+# File di configurazione con dati sensibili
+config.py
+
+# Cartelle con file generati dall'applicazione
+/notes/
+/transcripts/
+
+# File di cache e di ambiente di Python
+__pycache__/
+*.pyc
+.env
