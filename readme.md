@@ -1,5 +1,9 @@
 # Assistente Lezione v1.1
 
+## Progettazione della versione 2.0
+
+Il [documento di progettazione 2.0](docs/PROGETTAZIONE_V2.md) descrive il pannello docente, la gestione delle lezioni, l'aggiornamento dei servizi AI, i materiali multimediali e il piano di realizzazione. Le funzionalità indicate sono proposte e non ancora implementate.
+
 Un'applicazione desktop per Windows, macOS e Linux che assiste docenti e studenti registrando, trascrivendo e riassumendo lezioni in italiano. Il programma utilizza le API di OpenAI per fornire trascrizioni accurate e generare appunti strutturati.
 
 ## Caratteristiche Principali
