@@ -1,0 +1,48 @@
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const assert = require('node:assert/strict');
+(async () => {
+  const browser = await chromium.launch({channel:'msedge', headless:true});
+  try {
+    const page = await browser.newPage({viewport:{width:1440,height:1000}});
+    const errors=[]; page.on('pageerror', e=>errors.push(e.message));
+    await page.route('**/api/profile', route => route.fulfill({json:{name:'',assignments:[]}}));
+    await page.goto('http://127.0.0.1:8877');
+    await page.locator('#profile-panel').waitFor({state:'visible'});
+    await page.locator('#profile-quick-start').click();
+    await page.waitForFunction(()=>document.querySelector('#lesson-status').textContent==='Registrazione');
+    assert.equal(await page.locator('#profile-panel').isVisible(),false);
+    assert.equal(await page.locator('#quick-start').isEnabled(),false);
+    const title=await page.locator('#lesson-title').textContent();
+    assert.match(title,/Registrazione del/);
+    await page.locator('#metadata-summary').click();
+    await page.locator('#metadata-form [name=title]').fill('Avvio rapido collaudato');
+    await page.locator('#metadata-form [name=docente]').fill('Docente test');
+    await page.locator('#metadata-form [name=course]').fill('Design');
+    await page.locator('#metadata-form [name=materia]').fill('Grafica');
+    await page.locator('#metadata-form [name=year]').fill('1');
+    await page.locator('#metadata-form [name=section]').fill('a');
+    await page.locator('#save-metadata').click();
+    await page.waitForFunction(()=>document.querySelector('#lesson-title').textContent==='Avvio rapido collaudato');
+    assert.equal(await page.locator('#lesson-status').textContent(),'Registrazione');
+    await page.reload();
+    await page.locator('#show-recording').waitFor();
+    assert.equal(await page.locator('#profile-panel').isVisible(),false);
+    await page.locator('#show-recording').click();
+    await page.locator('#pause').click();
+    await page.waitForFunction(()=>document.querySelector('#lesson-status').textContent==='In pausa');
+    await page.locator('#pause').click();
+    await page.locator('#stop').click();
+    await page.waitForFunction(()=>document.querySelector('#lesson-status').textContent==='Salvata');
+    assert.match(await page.locator('#editor').inputValue(),/PROVA SIMULATA/);
+    await page.locator('#metadata-summary').click();
+    assert.equal(await page.locator('#metadata-form [name=course]').inputValue(),'Design');
+    await page.locator('#metadata-form [name=title]').fill('Avvio rapido completato');
+    await page.keyboard.press('Control+s');
+    await page.waitForFunction(()=>document.querySelector('#lesson-title').textContent==='Avvio rapido completato');
+    await page.setViewportSize({width:390,height:844});
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    await page.screenshot({path:'test-artifacts/quick-start-mobile.png',fullPage:true});
+    assert.deepEqual(errors,[]);
+    console.log('PASS: quick recording without profile, single active session, metadata during/after recording, reload recovery, pause/stop, Ctrl+S and mobile.');
+  } finally {await browser.close();}
+})().catch(e=>{console.error(e);process.exitCode=1});

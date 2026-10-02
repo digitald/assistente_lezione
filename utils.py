@@ -19,12 +19,15 @@ def generate_and_save_notes(session_id: str, ai_client: AIClient) -> bool:
 
     with open(transcript_filepath, "r", encoding="utf-8") as f:
         transcript_text = f.read()
+    if not transcript_text.strip():
+        return False
 
     print(f"⏳ Elaborazione appunti per {session_id} da file...")
     italian_notes = ai_client.summarize_transcript(transcript_text)
 
     if italian_notes:
         notes_filepath = Path(config.NOTES_DIR) / f"appunti_{session_id}.txt"
+        notes_filepath.parent.mkdir(parents=True, exist_ok=True)
         with open(notes_filepath, "w", encoding="utf-8") as f:
             f.write(italian_notes)
         print(f"✅ Appunti salvati in {notes_filepath}")
@@ -38,7 +41,7 @@ def save_transcript_to_file(session_id: str) -> str | None:
     Formatta la trascrizione (solo italiano) e la salva in un file permanente.
     """
     session_data = shared_state.session_transcripts.get(session_id)
-    if not session_data or not session_data.get("transcripts"):
+    if session_data is None:
         return None
 
     # CORREZIONE: Usa il nuovo formato con un solo campo "text"
@@ -47,8 +50,11 @@ def save_transcript_to_file(session_id: str) -> str | None:
     
     filepath = Path(config.TRANSCRIPTS_DIR) / f"trascrizione_{session_id}.txt"
     try:
-        with open(filepath, "w", encoding="utf-8") as f:
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        temporary = filepath.with_suffix(".txt.tmp")
+        with open(temporary, "w", encoding="utf-8") as f:
             f.write(transcript_text)
+        temporary.replace(filepath)
         print(f"✅ Trascrizione permanente salvata in: {filepath}")
         return str(filepath)
     except Exception as e:

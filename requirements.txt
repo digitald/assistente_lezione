@@ -3,6 +3,6 @@ openai
 sounddevice
 soundfile
 numpy
-requests
-Pillow
-qrcode
+Flask
+waitress
+faster-whisper

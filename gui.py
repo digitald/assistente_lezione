@@ -2,45 +2,52 @@
 
 import tkinter as tk
 from tkinter import messagebox, Listbox, Scrollbar, font
-import subprocess
-import sys
 import os
 import threading
+import queue
+import re
 from pathlib import Path
 from datetime import datetime
 
 import config
 import shared_state
 from utils import generate_and_save_notes, save_transcript_to_file
+from version import __version__
 
-# in gui.py
-
-# ... (tutte le importazioni esistenti) ...
-
-# gui.py (Versione 1.1 con Pausa/Riprendi)
-
-import tkinter as tk
-from tkinter import messagebox, Listbox, Scrollbar, font
-import subprocess
-import sys
-import os
-import threading
-from pathlib import Path
-from datetime import datetime
-
-import config
-import shared_state
-from utils import generate_and_save_notes, save_transcript_to_file
-
-def launch_gui(ai_client):
+def launch_gui(ai_client, demo=False, worker=None):
     root = tk.Tk()
-    root.title("Assistente Lezione (v1.1)")
+    root.title(f"Assistente Lezione {__version__} · Desktop legacy" + (" — PROVA SIMULATA" if demo else ""))
     root.geometry("600x600")
     root.minsize(500, 500)
+    def cancel_timers(event):
+        if event.widget is root:
+            for job in root.tk.call("after", "info"):
+                root.after_cancel(job)
+    root.bind("<Destroy>", cancel_timers, add="+")
 
     # Variabili di stato della GUI
     displayed_session_ids = []
     blink_job_id = None
+    demo_job_id = None
+    demo_segment_index = 0
+    finalizing = False
+    closing = False
+    last_error = None
+    ui_events = queue.Queue()
+
+    def append_demo_segment():
+        nonlocal demo_job_id, demo_segment_index
+        from demo_client import DEMO_SEGMENTS
+        demo_job_id = None
+        if not shared_state.session_active:
+            return
+        if not shared_state.session_paused and demo_segment_index < len(DEMO_SEGMENTS):
+            shared_state.session_transcripts[shared_state.current_session_id]["transcripts"].append({
+                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "text": DEMO_SEGMENTS[demo_segment_index],
+            })
+            demo_segment_index += 1
+        demo_job_id = root.after(4000, append_demo_segment)
 
     # --- Funzioni Logiche della GUI ---
 
@@ -70,21 +77,37 @@ def launch_gui(ai_client):
         blink_job_id = root.after(700, blink_status)
 
     def start_session_gui():
+        nonlocal demo_segment_index, last_error
+        last_error = None
         docente = docente_entry.get().strip()
         materia = materia_entry.get().strip()
         if not docente or not materia:
             messagebox.showerror("Dati Mancanti", "I campi 'Docente' e 'Materia' non possono essere vuoti.")
             return
 
-        docente_safe = docente.replace(" ", "_"); materia_safe = materia.replace(" ", "_")
+        docente_safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", docente).replace(" ", "_")
+        materia_safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", materia).replace(" ", "_")
         now = datetime.now()
-        timestamp = now.strftime("%Y%m%d_%H%M")
+        timestamp = now.strftime("%Y%m%d_%H%M%S%f")
         session_id = f"{docente_safe}_{materia_safe}_{timestamp}"
 
         shared_state.current_session_id = session_id
         shared_state.session_transcripts[session_id] = {"docente": docente, "materia": materia, "start_time": now.isoformat(), "transcripts": []}
         shared_state.session_active = True
         shared_state.session_paused = False
+        if worker is not None:
+            try:
+                worker.begin_session(session_id)
+            except Exception as exc:
+                from audio_worker import error_message
+                shared_state.session_active = False
+                shared_state.current_session_id = None
+                messagebox.showerror("Errore registrazione", error_message(exc))
+                status_label.config(text="Stato: microfono non disponibile", fg="red")
+                return
+        if demo:
+            demo_segment_index = 0
+            append_demo_segment()
 
         status_label.config(text=f"REC ● {session_id}", font=bold_font)
         blink_status()
@@ -97,18 +120,31 @@ def launch_gui(ai_client):
         print(f"▶️ Sessione avviata: {session_id}")
 
     def stop_session_gui():
-        if not shared_state.session_active: return
-        nonlocal blink_job_id
+        nonlocal blink_job_id, demo_job_id, finalizing
+        if finalizing or shared_state.current_session_id is None: return
+        if demo_job_id:
+            root.after_cancel(demo_job_id)
+            demo_job_id = None
         if blink_job_id:
             root.after_cancel(blink_job_id)
             blink_job_id = None
 
         session_id = shared_state.current_session_id
         print(f"⏹️  Sessione fermata: {session_id}")
-        save_transcript_to_file(session_id)
-        
         shared_state.session_active = False
         shared_state.session_paused = False
+        stop_button.config(state='disabled')
+        pause_button.config(state='disabled')
+        if worker is not None:
+            finalizing = True
+            status_label.config(text="Stato: attendo le trascrizioni e salvo...", background=root.cget('bg'), fg="orange")
+            worker.finish_session()
+        else:
+            finish_session_gui(session_id, save_transcript_to_file(session_id))
+
+    def finish_session_gui(session_id, saved):
+        nonlocal finalizing
+        finalizing = False
         shared_state.current_session_id = None
         
         status_label.config(text="Stato: Inattivo", font=font.Font(), background=root.cget('bg'), fg='gray')
@@ -118,6 +154,60 @@ def launch_gui(ai_client):
         stop_button.config(state='disabled')
         pause_button.config(state='disabled', text="⏸ Pausa")
         refresh_sessions_list()
+        if session_id in displayed_session_ids:
+            session_listbox.selection_set(displayed_session_ids.index(session_id))
+        data = shared_state.session_transcripts[session_id]
+        if not saved:
+            messagebox.showerror("Salvataggio non riuscito", "La trascrizione non è stata salvata. Controlla la cartella e lo spazio disponibile.")
+        elif not data["transcripts"]:
+            status_label.config(text="Stato: nessun testo trascritto; audio conservato", fg="red")
+            messagebox.showwarning("Nessuna trascrizione", (last_error or "Il microfono non ha prodotto testo trascrivibile.") +
+                                   "\nIl file di trascrizione è vuoto. L'audio, se acquisito, è conservato nella cartella transcripts/audio.")
+        else:
+            status_label.config(text=f"Stato: salvati {len(data['transcripts'])} segmenti" + ("; presenti errori" if data.get("errors") else ""), fg="blue")
+        if closing:
+            if worker is not None:
+                worker.stop()
+            root.destroy()
+
+    def poll_worker():
+        nonlocal last_error
+        while True:
+            try:
+                notes_filepath, success, error = ui_events.get_nowait()
+            except queue.Empty:
+                break
+            if success:
+                status_label.config(text="Stato: Appunti generati!", fg="blue")
+                refresh_sessions_list()
+                open_file(notes_filepath)
+            else:
+                status_label.config(text="Stato: Errore generazione", fg="red")
+                messagebox.showerror("Errore appunti", error or "Nessun testo disponibile per generare gli appunti.")
+        if worker is not None:
+            while True:
+                try:
+                    kind, session_id, payload = worker.events.get_nowait()
+                except queue.Empty:
+                    break
+                if kind in ("error", "capture_error", "warning"):
+                    last_error = payload
+                    status_label.config(text=payload, fg="red")
+                    if kind == "capture_error":
+                        stop_session_gui()
+                elif kind == "transcribed":
+                    refresh_sessions_list()
+                    progress_label.config(text="Ultimo testo: " + payload[:180])
+                elif kind == "processing":
+                    progress_label.config(text=f"Trascrizione del blocco {payload + 1} in corso...")
+                elif kind == "finished":
+                    finish_session_gui(session_id, payload)
+                    if closing:
+                        return
+            if shared_state.session_active:
+                level_label.config(text=f"Livello microfono: {min(100, int(worker.level * 1000))}%" +
+                                   (" — segnale basso" if worker.level < 0.001 else ""))
+        root.after(150, poll_worker)
     
     def refresh_sessions_list():
         nonlocal displayed_session_ids
@@ -125,17 +215,20 @@ def launch_gui(ai_client):
         displayed_session_ids.clear()
         all_session_ids = set()
         for f in Path(config.TRANSCRIPTS_DIR).glob("trascrizione_*.txt"):
-            all_session_ids.add(f.stem.replace("trascrizione_", ""))
+            all_session_ids.add(f.stem.removeprefix("trascrizione_"))
         for f in Path(config.NOTES_DIR).glob("appunti_*.txt"):
-            all_session_ids.add(f.stem.replace("appunti_", ""))
-        sorted_ids = sorted(list(all_session_ids), key=lambda x: x.split('_')[-2] + x.split('_')[-1], reverse=True)
+            all_session_ids.add(f.stem.removeprefix("appunti_"))
+        sorted_ids = sorted(all_session_ids, key=lambda x: "_".join(x.split('_')[-2:]), reverse=True)
         displayed_session_ids.extend(sorted_ids)
         for session_id in sorted_ids:
             transcript_exists = (Path(config.TRANSCRIPTS_DIR) / f"trascrizione_{session_id}.txt").exists()
             notes_exist = (Path(config.NOTES_DIR) / f"appunti_{session_id}.txt").exists()
-            transcript_icon = "📜" if transcript_exists else "⏳"
+            transcript_icon = ("📜" if (Path(config.TRANSCRIPTS_DIR) / f"trascrizione_{session_id}.txt").stat().st_size else "⚠") if transcript_exists else "⏳"
             notes_icon = "📝" if notes_exist else "▪️"
             parts = session_id.split('_')
+            if len(parts) < 4:
+                session_listbox.insert(tk.END, f"{transcript_icon}{notes_icon} {session_id}")
+                continue
             docente, materia = parts[0], " ".join(parts[1:-2])
             data_str, ora_str = parts[-2], parts[-1]
             display_text = f'{transcript_icon}{notes_icon} {materia} - {docente} ({data_str[6:8]}/{data_str[4:6]} {ora_str[0:2]}:{ora_str[2:4]})'
@@ -149,6 +242,9 @@ def launch_gui(ai_client):
         return displayed_session_ids[selected_indices[0]]
 
     def generate_notes_gui():
+        if finalizing:
+            messagebox.showinfo("Trascrizione in corso", "Attendi il salvataggio finale prima di generare gli appunti.")
+            return
         session_id = get_selected_session_id()
         if not session_id: return
         notes_filepath = Path(config.NOTES_DIR) / f"appunti_{session_id}.txt"
@@ -157,13 +253,12 @@ def launch_gui(ai_client):
             status_label.config(text=f"Stato: Genero appunti...", fg="orange")
             root.update_idletasks()
             def run_generation():
-                success = generate_and_save_notes(session_id, ai_client)
-                if success:
-                    status_label.config(text="Stato: Appunti generati!", fg="blue")
-                    open_file(notes_filepath)
-                else:
-                    status_label.config(text="Stato: Errore generazione", fg="red")
-                    messagebox.showerror("Errore", "Impossibile generare gli appunti.")
+                try:
+                    success = generate_and_save_notes(session_id, ai_client)
+                    ui_events.put((notes_filepath, success, None))
+                except Exception as exc:
+                    from audio_worker import error_message
+                    ui_events.put((notes_filepath, False, error_message(exc)))
             threading.Thread(target=run_generation, daemon=True).start()
         else:
             open_file(notes_filepath)
@@ -177,16 +272,30 @@ def launch_gui(ai_client):
 
     def open_file(filepath):
         try:
-            if sys.platform == "win32": os.startfile(filepath)
-            elif sys.platform == "darwin": subprocess.run(["open", filepath], check=True)
-            else: subprocess.run(["xdg-open", filepath], check=True)
+            from tkinter.scrolledtext import ScrolledText
+            content = Path(filepath).read_text(encoding="utf-8")
+            window = tk.Toplevel(root)
+            window.title(Path(filepath).name)
+            window.geometry("850x650")
+            text = ScrolledText(window, wrap=tk.WORD, padx=12, pady=12)
+            text.pack(fill=tk.BOTH, expand=True)
+            text.insert("1.0", content or "Nessuna trascrizione disponibile. Controlla gli errori del servizio AI e il livello del microfono.")
+            text.config(state="disabled")
         except Exception as e: messagebox.showerror("Errore Apertura File", f"Impossibile aprire il file:\n{e}")
 
     def shutdown_application():
+        nonlocal closing
         if messagebox.askyesno("Conferma Uscita", "Sei sicuro di voler chiudere l'applicazione?"):
+            closing = True
+            if finalizing:
+                return
+            if shared_state.current_session_id is not None:
+                stop_session_gui()
+                return
+            if worker is not None:
+                worker.stop()
             print("🛑 Chiusura dell'applicazione...")
             root.destroy()
-            os._exit(0)
     
     # --- Struttura Grafica della GUI ---
     bold_font = font.Font(family="Helvetica", size=10, weight="bold")
@@ -202,6 +311,11 @@ def launch_gui(ai_client):
     tk.Label(session_frame, text="Materia:").grid(row=1, column=0, sticky='w', padx=5, pady=2)
     materia_entry = tk.Entry(session_frame)
     materia_entry.grid(row=1, column=1, sticky='ew', padx=5, pady=2)
+    if demo:
+        docente_entry.insert(0, "Demo")
+        materia_entry.insert(0, "Ciclo dell'acqua")
+        tk.Label(session_frame, text="Prova simulata: testo campione ogni 4 secondi, nessun uso di microfono o API.",
+                 wraplength=500, fg="#664d03").grid(row=3, column=0, columnspan=2, pady=5)
     
     controls_container = tk.Frame(session_frame)
     controls_container.grid(row=2, column=0, columnspan=2, pady=(10,0), sticky='ew')
@@ -237,9 +351,14 @@ def launch_gui(ai_client):
     
     status_label = tk.Label(root, text="Stato: Inattivo", fg="gray", bd=1, relief=tk.SUNKEN, anchor=tk.W, padx=5)
     status_label.pack(side=tk.BOTTOM, fill=tk.X)
+    level_label = tk.Label(root, text="Livello microfono: inattivo", anchor=tk.W)
+    level_label.pack(side=tk.BOTTOM, fill=tk.X)
+    progress_label = tk.Label(root, text="", wraplength=560, anchor=tk.W, justify=tk.LEFT)
+    progress_label.pack(side=tk.BOTTOM, fill=tk.X)
     tk.Button(root, text="Chiudi Applicazione", command=shutdown_application, bg="#6c757d", fg="white").pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=5)
 
     root.protocol("WM_DELETE_WINDOW", shutdown_application)
     
     refresh_sessions_list()
+    root.after(150, poll_worker)
     root.mainloop()

@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Assistente Lezione {{ version }}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/profile.js" defer></script>
+  <script src="/static/notes.js" defer></script>
+  <script src="/static/app.js" defer></script>
+  <script src="/static/quickstart.js" defer></script>
+  <script src="/static/workspace.js" defer></script>
+</head>
+<body>
+<svg class="icon-sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
+  <symbol id="icon-lessons" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h5"/></symbol>
+  <symbol id="icon-archive" viewBox="0 0 24 24"><path d="M4 8v12h16V8M3 4h18v4H3zM9 12h6"/></symbol>
+  <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></symbol>
+  <symbol id="icon-audio" viewBox="0 0 24 24"><path d="M4 9v6M8 5v14M12 2v20M16 6v12M20 9v6"/></symbol>
+</defs></svg>
+<aside class="sidebar" aria-label="Navigazione principale">
+  <a class="brand" href="/" aria-label="Assistente Lezione"><span class="logo">aL</span><span>Assistente<strong>Lezione</strong></span></a>
+  <div class="workspace-label"><span class="workspace-avatar">D</span><div>Spazio docente<small>Archivio personale</small></div></div>
+  <div class="nav-label">LIBRERIA</div>
+  <nav class="app-nav">
+    <button class="nav active" id="archive-nav" data-collection="active"><svg class="icon"><use href="#icon-lessons"/></svg>Lezioni</button>
+    <button class="nav" data-collection="archived"><svg class="icon"><use href="#icon-archive"/></svg>Archiviate</button>
+    <button class="nav" data-collection="trash"><svg class="icon"><use href="#icon-trash"/></svg>Cestino</button>
+  </nav>
+  <div class="sidebar-bottom">
+    <div class="library-stats"><span><strong id="lesson-count">0</strong> lezioni</span><span><strong id="ready-count">0</strong> pronte</span></div>
+    <button id="profile-button" class="profile-button">Profilo docente</button>
+    <div class="local-status"><span class="dot"></span> Archivio sul tuo PC</div>
+  </div>
+</aside>
+<main>
+  <header class="app-header"><div class="page-location"><span class="breadcrumb">Spazio docente <span>/</span></span><h1 id="page-title">Lezioni</h1></div><div class="header-actions"><button id="quick-start" class="primary" title="Avvia il microfono predefinito. Trascrizione OpenAI dopo l'arresto." disabled>● Registra subito</button><button id="import-new-button" class="secondary">↑ Importa audio</button><button id="new-button" class="secondary">＋ Nuova lezione</button></div><input id="new-audio-file" type="file" accept="audio/*,.mp4,.m4a,.webm,.ogg,.flac" hidden></header>
+  <div id="connection" class="notice" role="status" hidden></div>
+  <div id="demo-banner" class="notice demo-notice" hidden>Ambiente di prova · Audio e appunti simulati, nessun servizio AI utilizzato.</div>
+  <div id="recording-banner" class="recording-banner" hidden><strong id="recording-summary"></strong><button id="show-recording" class="secondary">Apri registrazione</button></div>
+
+  <section id="profile-panel" class="form-panel" role="dialog" aria-modal="true" aria-labelledby="profile-heading" hidden>
+    <div class="section-title"><div><p class="eyebrow">IMPOSTAZIONI</p><h2 id="profile-heading">Profilo e classi</h2></div><button id="close-profile" class="text-button" hidden>Chiudi</button></div>
+    <p class="muted">Imposta il docente e le classi. Saranno disponibili per tutte le nuove lezioni.</p>
+    <form id="profile-form">
+      <label>Nome del docente<input id="teacher-name" required maxlength="200" autocomplete="name" placeholder="Nome e cognome"></label>
+      <div id="assignment-rows"></div>
+      <button type="button" id="add-assignment" class="secondary">＋ Aggiungi insegnamento o classe</button>
+      <p id="profile-draft-status" class="muted">Le modifiche vengono conservate come bozza su questo browser.</p>
+      <div id="profile-error" class="error" role="alert" hidden></div>
+      <div class="form-actions"><button id="profile-quick-start" type="button" class="secondary" disabled>● Registra subito, compila dopo</button><button type="submit" class="primary">Salva profilo e continua →</button></div>
+    </form>
+  </section>
+  <section id="create-panel" class="form-panel create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-heading" hidden>
+    <div class="section-title"><div><p class="eyebrow">NUOVA SESSIONE</p><h2 id="create-heading">Crea una lezione</h2></div><button id="cancel-create" class="text-button">Chiudi</button></div>
+    <form id="create-form"><div id="import-summary" class="import-summary" hidden></div>
+      <div class="fields">
+        <label class="wide">Titolo della lezione<input name="title" id="title-input" required maxlength="200" placeholder="Es. 01 - Introduzione al progetto"></label>
+        <label>Corso<select id="course-choice" required></select></label>
+        <label>Insegnamento<select id="teaching-choice" required></select></label>
+        <label>Anno<select id="year-choice" required></select></label>
+        <label>Sezione<select id="section-choice" required></select></label>
+        <input id="assignment-id" name="assignment_id" type="hidden"><p id="teacher-context" class="muted wide"></p>
+      </div>
+      <details id="transcription-options"><summary>Opzioni di trascrizione</summary><div class="fields"><label>Motore<select name="engine" id="engine"><option value="local">Locale · sul tuo PC</option><option value="openai" selected>OpenAI · cloud</option></select></label><label>Modello<select name="model" id="model"></select></label></div><p id="engine-hint" class="muted"></p></details>
+      <div id="create-error" class="error" role="alert" hidden></div>
+      <div class="form-actions"><span class="muted">Potrai registrare o importare un audio.</span><button id="create-submit" class="primary" type="submit">Crea lezione →</button></div>
+    </form>
+  </section>
+
+  <div class="workspace-layout">
+    <section class="archive" aria-label="Elenco delle lezioni">
+      <div class="archive-heading"><h2 id="list-title">Lezioni</h2><span id="archive-total" class="count">0</span></div>
+      <div class="archive-filters"><input id="search" type="search" placeholder="Cerca nelle lezioni…" aria-label="Cerca nell'archivio"><label class="collection-label">Mostra<select id="collection"><option value="active">Lezioni</option><option value="archived">Archiviate</option><option value="trash">Cestino</option></select></label></div>
+      <div id="lesson-list"></div><p id="empty-archive" class="empty">Crea la tua prima lezione.</p>
+    </section>
+    <section class="workspace" aria-label="Area di lavoro della lezione">
+      <p id="loading-detail" class="muted loading" role="status" hidden>Caricamento della lezione…</p>
+      <div id="empty-workspace" class="welcome"><svg class="welcome-icon icon"><use href="#icon-lessons"/></svg><h2>Apri una lezione per iniziare</h2><p>Trovi audio, trascrizione e appunti<br>in un unico spazio di lavoro.</p><button id="empty-new" class="secondary">＋ Nuova lezione</button><div class="steps"><span>Registra</span><span>Revisiona</span><span>Studia</span></div></div>
+      <div id="lesson-detail" hidden>
+        <div class="detail-heading"><div><p id="lesson-meta" class="eyebrow"></p><h2 id="lesson-title"></h2></div><span id="lesson-status" class="badge"></span></div>
+        <div class="lesson-management"><button id="archive-lesson" class="text-button">Archivia</button><button id="restore-lesson" class="text-button" hidden>Riporta in Lezioni</button><button id="trash-lesson" class="text-button danger">Sposta nel cestino</button><button id="delete-lesson" class="text-button danger" hidden>Elimina definitivamente</button></div>
+        <p id="progress" class="muted" aria-live="polite"></p><div id="error-box" class="error" hidden role="alert"></div><p id="collection-notice" class="notice" hidden></p>
+        <details id="metadata-panel" class="metadata-panel"><summary id="metadata-summary">Dati della lezione</summary>
+          <form id="metadata-form"><p class="muted">Puoi salvare questi dati anche durante la registrazione. Il profilo docente resta invariato.</p>
+            <label>Compila da una classe del profilo<select id="metadata-assignment"><option value="">Inserisci o modifica i dati qui sotto</option></select></label>
+            <div class="fields">
+              <label class="wide">Titolo<input name="title" required maxlength="200"></label>
+              <label>Docente<input name="docente" maxlength="200"></label><label>Corso<input name="course" maxlength="200"></label>
+              <label class="wide">Insegnamento<input name="materia" maxlength="200"></label>
+              <label>Anno<input name="year" type="number" min="1" max="10"></label><label>Sezione<input name="section" maxlength="200"></label>
+            </div><p id="metadata-error" class="error" role="alert" hidden></p><div class="form-actions"><button id="save-metadata" class="secondary" type="submit">Salva dati della lezione</button></div>
+          </form>
+        </details>
+        <div id="record-panel" class="record-panel">
+          <div class="record-label"><svg class="icon"><use href="#icon-audio"/></svg><strong>Acquisizione audio</strong><span>Registrazione sul PC</span></div>
+          <div class="record-top"><label>Microfono<select id="device"><option value="">Predefinito</option></select></label><span id="timer" class="timer">00:00</span></div>
+          <div class="meter"><progress id="level" max="0.1" value="0" aria-label="Livello del microfono"></progress><span id="level-text">Pronto per registrare</span></div>
+          <div class="controls"><button id="start" class="primary">● Registra</button><button id="pause" class="secondary">Pausa</button><button id="stop" class="stop">■ Ferma e trascrivi</button><button id="import-button" class="text-button">↑ Importa audio</button><input type="file" id="audio-file" accept="audio/*,.mp4,.m4a,.webm" hidden></div>
+          <p class="small muted">La trascrizione inizia quando fermi la registrazione.</p>
+        </div>
+        <div class="document-bar">
+          <div class="tabs" role="tablist" aria-label="Contenuto della lezione"><button id="transcript-tab" class="tab active" role="tab" aria-selected="true">Trascrizione</button><button id="notes-tab" class="tab" role="tab" aria-selected="false">Appunti</button></div>
+          <details id="export-menu" class="export-menu"><summary>Esporta ↓</summary><div class="export-options" aria-label="Esporta la lezione">
+            <a id="download" class="text-button">Trascrizione <span>TXT</span></a>
+            <a id="download-notes" class="text-button">Appunti <span>TXT</span></a>
+            <a id="download-markdown" class="text-button">Appunti <span>Markdown · MD</span></a>
+            <button id="print-notes" class="text-button">Appunti <span>Stampa / PDF</span></button>
+            <a id="download-audio" class="text-button">Audio <span>File originale</span></a>
+            <p id="export-hint" class="muted">Esporta i contenuti salvati della lezione.</p>
+          </div></details>
+        </div>
+        <div class="editor-toolbar"><span id="editor-caption" class="muted">Revisiona il testo prima di generare gli appunti.</span><span id="dirty" class="small" hidden>Modifiche da salvare · Ctrl+S</span></div>
+        <div id="notes-tools" class="notes-tools" hidden><div class="notes-mode" role="group" aria-label="Vista degli appunti"><button id="notes-read" class="secondary" aria-pressed="true">Lettura</button><button id="notes-edit" class="secondary" aria-pressed="false">Modifica</button></div></div>
+        <div id="format-toolbar" class="format-toolbar" role="group" aria-label="Formatta gli appunti" hidden><button type="button" data-format="heading">Titolo</button><button type="button" data-format="subheading">Sottotitolo</button><button type="button" data-format="bold"><strong>Grassetto</strong></button><button type="button" data-format="bullet">• Elenco</button><button type="button" data-format="numbered">1. Passaggi</button><button type="button" data-format="quote">Citazione</button></div>
+        <p id="format-hint" class="muted" hidden>Seleziona il testo e scegli un formato. Passa a Lettura per vedere il risultato; salva per conservarlo.</p>
+        <article id="notes-preview" class="notes-document" aria-label="Appunti formattati" hidden></article>
+        <textarea id="editor" placeholder="La trascrizione apparirà qui dopo l'elaborazione dell'audio." aria-label="Testo della lezione"></textarea>
+        <div class="editor-actions"><button id="save" class="secondary">Salva modifiche</button><button id="generate" class="primary">✦ Genera appunti</button><button id="retry" class="text-button">Riprova trascrizione</button></div>
+        <audio id="audio-player" controls preload="none" hidden></audio>
+      </div>
+    </section>
+  </div>
+  <footer><span><span class="dot"></span> Assistente Lezione {{ version }} · Locale</span><span id="key-expiry">Audio e documenti sul tuo PC</span></footer>
+</main>
+<div id="toast" role="status" hidden></div>
+</body>
+</html>

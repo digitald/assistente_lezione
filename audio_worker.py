@@ -1,117 +1,133 @@
-# audio_worker.py (versione semplificata per Assistente Lezione)
-
+"""Audio su disco, coda ordinata e finalizzazione esplicita."""
+import queue
 import threading
-import time
+from datetime import datetime
+from pathlib import Path
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
-import io
-from datetime import datetime
-
+import config
 import shared_state
-from ai_client import AIClient
-
-# La classe CircularBuffer rimane invariata
-class CircularBuffer:
-    def __init__(self, size):
-        self.buffer = np.zeros(size, dtype=np.float32)
-        self.size = size
-        self.index = 0
-        self.filled = False
-        
-    def add_data(self, data):
-        data_len = len(data)
-        if data_len > self.size:
-            data = data[-self.size:]
-        if self.index + data_len > self.size:
-            part1 = self.size - self.index
-            self.buffer[self.index:self.index+part1] = data[:part1]
-            self.buffer[0:data_len-part1] = data[part1:]
-            self.index = data_len - part1
-        else:
-            self.buffer[self.index:self.index+data_len] = data
-            self.index = (self.index + data_len) % self.size
-        if not self.filled and self.index == 0:
-            self.filled = True
-            
-    def get_data(self):
-        if self.filled:
-            return np.concatenate([self.buffer[self.index:], self.buffer[:self.index]])
-        return self.buffer[:self.index]
+from utils import save_transcript_to_file
+from app_errors import error_message
 
 
-# La classe del worker è stata rinominata e semplificata
 class TranscriptionWorker(threading.Thread):
-    def __init__(self, ai_client: AIClient, chunk_duration=4, sample_rate=16000):
+    def __init__(self, ai_client, chunk_duration=4, sample_rate=16000):
         super().__init__(daemon=True)
-        # ... (le altre inizializzazioni non cambiano) ...
         self.ai_client = ai_client
-        self.chunk_duration = chunk_duration
         self.sample_rate = sample_rate
         self.samples_per_chunk = int(sample_rate * chunk_duration)
-        self.running = False
-        self.processing = False
-        self.audio_buffer = CircularBuffer(sample_rate * (chunk_duration * 3))
         self.lock = threading.Lock()
+        self.jobs = queue.Queue()
+        self.events = queue.Queue()
+        self.stream = None
+        self.audio_file = None
+        self.session_id = None
+        self.pending = np.empty(0, dtype=np.float32)
+        self.segment_index = 0
+        self.level = 0.0
+
+    def begin_session(self, session_id):
+        if self.stream is not None:
+            raise RuntimeError("Registrazione già attiva")
+        audio_dir = Path(config.TRANSCRIPTS_DIR) / "audio"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        path = audio_dir / f"audio_{session_id}.wav"
+        self.session_id = session_id
+        self.pending = np.empty(0, dtype=np.float32)
+        self.segment_index = 0
+        self.audio_file = sf.SoundFile(path, mode="w", samplerate=self.sample_rate, channels=1, subtype="PCM_16")
+        try:
+            self.stream = sd.InputStream(samplerate=self.sample_rate, channels=1, dtype="float32",
+                                         callback=self.audio_callback, blocksize=1024)
+            self.stream.start()
+        except Exception:
+            if self.stream is not None:
+                self.stream.close()
+            self.stream = None
+            self.audio_file.close()
+            self.audio_file = None
+            self.session_id = None
+            raise
+        shared_state.session_transcripts[session_id]["audio_path"] = str(path)
+
+    def _enqueue(self, data):
+        self.jobs.put(("segment", self.session_id, self.segment_index, data.copy()))
+        self.segment_index += 1
 
     def audio_callback(self, indata, frames, time_info, status):
         if status:
-            print(f"Audio status: {status}")
-        # MODIFICA: Controlla anche se la sessione non è in pausa
-        if self.running and shared_state.session_active and not shared_state.session_paused:
+            self.events.put(("warning", self.session_id, "Il dispositivo segnala un'interruzione audio."))
+        if not shared_state.session_active or shared_state.session_paused:
+            return
+        try:
             with self.lock:
-                self.audio_buffer.add_data(indata[:, 0])
+                data = indata[:, 0]
+                self.level = float(np.sqrt(np.mean(data ** 2)))
+                self.audio_file.write(data)
+                self.audio_file.flush()
+                self.pending = np.concatenate((self.pending, data))
+                while len(self.pending) >= self.samples_per_chunk:
+                    self._enqueue(self.pending[:self.samples_per_chunk])
+                    self.pending = self.pending[self.samples_per_chunk:]
+        except Exception as exc:
+            shared_state.session_active = False
+            self.events.put(("capture_error", self.session_id, error_message(exc)))
+
+    def finish_session(self):
+        session_id = self.session_id
+        if self.stream is not None:
+            for operation in (self.stream.stop, self.stream.close):
+                try:
+                    operation()
+                except Exception as exc:
+                    self.events.put(("error", session_id, error_message(exc)))
+            self.stream = None
+        with self.lock:
+            if len(self.pending):
+                self._enqueue(self.pending)
+                self.pending = np.empty(0, dtype=np.float32)
+            if self.audio_file is not None:
+                self.audio_file.close()
+                self.audio_file = None
+            self.session_id = None
+        self.jobs.put(("finish", session_id, None, None))
 
     def run(self):
-        self.running = True
-        print("▶️ Worker di trascrizione avviato e in attesa di una sessione...")
-        with sd.InputStream(
-            samplerate=self.sample_rate, channels=1, dtype="float32",
-            callback=self.audio_callback, blocksize=self.sample_rate
-        ):
-            while self.running:
-                # MODIFICA: Metti in pausa il ciclo se session_paused è True
-                if not shared_state.session_active or shared_state.session_paused or self.processing:
-                    time.sleep(0.1)
+        while True:
+            kind, session_id, index, data = self.jobs.get()
+            try:
+                if kind == "shutdown":
+                    return
+                if kind == "finish":
+                    saved = save_transcript_to_file(session_id)
+                    self.events.put(("finished", session_id, saved))
                     continue
-
-                with self.lock:
-                    buffered_data = self.audio_buffer.get_data()
-
-                if len(buffered_data) >= self.samples_per_chunk:
-                    self.processing = True
-                    audio_chunk = buffered_data[-self.samples_per_chunk:]
-                    threading.Thread(target=self.process_chunk, args=(audio_chunk,)).start()
-    
-    # ... (La funzione process_chunk non cambia) ...
-    def process_chunk(self, audio_data):
-        try:
-            rms = np.sqrt(np.mean(audio_data**2))
-            if rms < 0.01:
-                return 
-
-            print("🎤 Chunk audio acquisito, avvio trascrizione...")
-            
-            wav_bytes = io.BytesIO()
-            sf.write(wav_bytes, audio_data, self.sample_rate, format='WAV')
-            wav_bytes.seek(0)
-            wav_bytes.name = "stream.wav"
-            
-            text = self.ai_client.transcribe(wav_bytes)
-            
-            if text:
-                print(f"📥 Trascritto: {text}")
-                if shared_state.current_session_id in shared_state.session_transcripts:
-                    timestamp = datetime.now().strftime("%H:%M:%S")
-                    shared_state.session_transcripts[shared_state.current_session_id]["transcripts"].append({
-                        "timestamp": timestamp,
-                        "text": text
+                folder = Path(config.TRANSCRIPTS_DIR) / "audio" / session_id
+                folder.mkdir(parents=True, exist_ok=True)
+                path = folder / f"segmento_{index:06d}.wav"
+                sf.write(path, data, self.sample_rate)
+                if float(np.sqrt(np.mean(data ** 2))) < 0.0001:
+                    continue
+                self.events.put(("processing", session_id, index))
+                with path.open("rb") as audio:
+                    text = self.ai_client.transcribe(audio)
+                if text:
+                    shared_state.session_transcripts[session_id]["transcripts"].append({
+                        "timestamp": datetime.now().strftime("%H:%M:%S"), "text": text,
                     })
-
-        except Exception as e:
-            print(f"❌ Errore durante l'elaborazione del chunk: {e}")
-        finally:
-            self.processing = False
+                    if save_transcript_to_file(session_id) is None:
+                        raise OSError("Salvataggio trascrizione fallito")
+                    self.events.put(("transcribed", session_id, text))
+            except Exception as exc:
+                message = error_message(exc)
+                shared_state.session_transcripts[session_id].setdefault("errors", []).append(message)
+                self.events.put(("error", session_id, message))
+                if kind == "finish":
+                    self.events.put(("finished", session_id, None))
+            finally:
+                self.jobs.task_done()
 
     def stop(self):
-        self.running = False
+        self.jobs.put(("shutdown", None, None, None))
